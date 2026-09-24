@@ -1,7 +1,8 @@
 streamlit
-openai
+groq
 tiktoken
 scikit-learn
 numpy
 pandas
 plotly
+sentence-transformers
