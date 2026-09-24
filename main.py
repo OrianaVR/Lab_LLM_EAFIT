@@ -1,16 +1,26 @@
-import streamlit as st
-import pandas as pd
+
+import os
+import re
+from collections import Counter
+
 import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 import tiktoken
 
-from openai import OpenAI
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from groq import Groq
+
+from sklearn.feature_extraction.text import (
+    CountVectorizer,
+    TfidfVectorizer
+)
 from sklearn.metrics.pairwise import cosine_similarity
-import plotly.express as px
+from sklearn.decomposition import PCA
 
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN GENERAL
 # ============================================================
 
 st.set_page_config(
@@ -20,43 +30,119 @@ st.set_page_config(
 )
 
 st.title("🧠 LLM & NLP Laboratory")
-st.write(
-    "Plataforma interactiva para experimentar con LLM, "
-    "tokens, Bag of Words, similitud, embeddings y generación de texto."
+
+st.markdown(
+    """
+    Plataforma interactiva para explorar:
+
+    - Modelos de lenguaje (LLM)
+    - Tokens y Token IDs
+    - Bag of Words
+    - TF-IDF
+    - Métricas de similitud
+    - Embeddings
+    - Generación de texto con Groq
+    """
 )
 
 
 # ============================================================
-# OPENAI
+# FUNCIONES AUXILIARES
 # ============================================================
+
+def normalize_text(text):
+    """Normaliza texto para algunas operaciones de NLP."""
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def jaccard_similarity(text1, text2):
+    """Calcula similitud de Jaccard entre conjuntos de palabras."""
+    words1 = set(re.findall(r"\b\w+\b", text1.lower()))
+    words2 = set(re.findall(r"\b\w+\b", text2.lower()))
+
+    union = words1 | words2
+
+    if not union:
+        return 0.0
+
+    return len(words1 & words2) / len(union)
+
+
+@st.cache_resource
+def load_embedding_model():
+    """
+    Carga un modelo de embeddings local.
+    Se descarga la primera vez que se utiliza.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(
+        "sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+
+def get_tokenizer():
+    """
+    Tokenizador aproximado compatible con cl100k_base.
+    No representa necesariamente el tokenizador interno
+    de cada modelo disponible en Groq.
+    """
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def tokenize_text(text):
+    """Devuelve tokens e IDs."""
+    encoding = get_tokenizer()
+
+    token_ids = encoding.encode(text)
+
+    tokens = [
+        encoding.decode([token_id])
+        for token_id in token_ids
+    ]
+
+    return tokens, token_ids
+
+
+# ============================================================
+# SIDEBAR - CONFIGURACIÓN
+# ============================================================
+
+st.sidebar.header("⚙️ Configuración")
 
 api_key = st.sidebar.text_input(
-    "OpenAI API Key",
-    type="password"
+    "Groq API Key",
+    type="password",
+    help="Introduce tu clave de Groq. No la compartas públicamente."
 )
 
+# También permite usar la variable de entorno GROQ_API_KEY.
+if not api_key:
+    api_key = os.getenv("GROQ_API_KEY")
+
 if api_key:
-    client = OpenAI(api_key=api_key)
+    client = Groq(api_key=api_key)
 else:
     client = None
 
 
 # ============================================================
-# SIDEBAR
+# MODELOS GROQ
 # ============================================================
 
-st.sidebar.header("⚙️ Configuración del modelo")
+MODEL_OPTIONS = {
+    "Llama 3.1 8B Instant": "llama-3.1-8b-instant",
+    "Llama 3.3 70B Versatile": "llama-3.3-70b-versatile",
+    "GPT-OSS 20B": "openai/gpt-oss-20b",
+    "GPT-OSS 120B": "openai/gpt-oss-120b"
+}
 
-models = [
-    "gpt-5.6-mini",
-    "gpt-5.6",
-    "gpt-5-mini",
-]
-
-model = st.sidebar.selectbox(
-    "Modelo GPT",
-    models
+selected_model_name = st.sidebar.selectbox(
+    "Modelo",
+    list(MODEL_OPTIONS.keys())
 )
+
+selected_model = MODEL_OPTIONS[selected_model_name]
 
 temperature = st.sidebar.slider(
     "Temperatura",
@@ -67,18 +153,23 @@ temperature = st.sidebar.slider(
 )
 
 max_tokens = st.sidebar.number_input(
-    "Máximo de tokens",
+    "Máximo de tokens de salida",
     min_value=1,
-    max_value=4096,
-    value=500
+    max_value=8192,
+    value=500,
+    step=100
 )
 
 top_p = st.sidebar.slider(
     "Top P",
-    min_value=0.0,
+    min_value=0.05,
     max_value=1.0,
     value=1.0,
     step=0.05
+)
+
+st.sidebar.caption(
+    "Los modelos disponibles y sus límites pueden cambiar."
 )
 
 
@@ -91,148 +182,271 @@ tabs = st.tabs([
     "🔤 Tokens",
     "📚 Bag of Words",
     "📐 Similitud",
-    "🔢 Embeddings"
+    "🔢 Embeddings",
+    "⚖️ Comparar modelos"
 ])
 
 
 # ============================================================
-# GENERACIÓN DE TEXTO
+# 1. GENERACIÓN DE TEXTO
 # ============================================================
 
 with tabs[0]:
 
-    st.header("🤖 Generación de texto")
+    st.header("🤖 Generación de texto con Groq")
+
+    st.write(f"Modelo seleccionado: **{selected_model_name}**")
+
+    system_prompt = st.text_area(
+        "Instrucciones del sistema",
+        value="Eres un asistente educativo experto en NLP y LLM.",
+        height=100
+    )
 
     prompt = st.text_area(
         "Escribe tu prompt",
-        height=150,
-        placeholder="Explica qué es Machine Learning..."
+        placeholder="Explica qué es un embedding...",
+        height=150
     )
 
-    if st.button("Generar texto", type="primary"):
+    generate_button = st.button(
+        "🚀 Generar texto",
+        type="primary",
+        key="generate_text"
+    )
+
+    if generate_button:
 
         if not api_key:
-            st.error("Introduce tu API Key de OpenAI.")
-        elif not prompt:
-            st.warning("Escribe un prompt.")
+            st.error("Introduce tu API Key de Groq.")
+
+        elif not prompt.strip():
+            st.warning("Escribe un prompt antes de generar.")
+
         else:
 
             try:
 
-                response = client.responses.create(
-                    model=model,
-                    input=prompt,
-                    temperature=temperature,
-                    max_output_tokens=max_tokens,
-                    top_p=top_p
-                )
+                with st.spinner("Generando respuesta..."):
+
+                    messages = [
+                        {
+                            "role": "system",
+                            "content": system_prompt
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+
+                    response = client.chat.completions.create(
+                        model=selected_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_completion_tokens=int(max_tokens),
+                        top_p=top_p
+                    )
+
+                answer = response.choices[0].message.content
 
                 st.subheader("Respuesta")
 
-                st.write(response.output_text)
+                st.write(answer)
 
-            except Exception as e:
+                st.subheader("Información de uso")
 
-                st.error(f"Error: {e}")
+                usage = response.usage
+
+                if usage:
+
+                    col1, col2, col3 = st.columns(3)
+
+                    col1.metric(
+                        "Tokens de entrada",
+                        usage.prompt_tokens
+                    )
+
+                    col2.metric(
+                        "Tokens de salida",
+                        usage.completion_tokens
+                    )
+
+                    col3.metric(
+                        "Total de tokens",
+                        usage.total_tokens
+                    )
+
+            except Exception as error:
+
+                st.error(
+                    f"Error al generar texto: {error}"
+                )
 
 
 # ============================================================
-# TOKENS
+# 2. TOKENS Y TOKEN IDS
 # ============================================================
 
 with tabs[1]:
 
-    st.header("🔤 Tokenización")
+    st.header("🔤 Tokens y Token IDs")
 
-    text = st.text_area(
-        "Texto para tokenizar",
-        "Los modelos de lenguaje procesan texto mediante tokens."
+    st.info(
+        "La tokenización mostrada utiliza cl100k_base como "
+        "referencia local. No garantiza que coincida con "
+        "el tokenizador interno del modelo Groq seleccionado."
     )
 
-    try:
+    token_text = st.text_area(
+        "Texto para tokenizar",
+        value="Los modelos de lenguaje procesan texto mediante tokens.",
+        height=120
+    )
 
-        encoding = tiktoken.get_encoding("cl100k_base")
+    if st.button("🔍 Tokenizar texto", key="tokenize"):
 
-        tokens = encoding.encode(text)
+        if not token_text.strip():
 
-        decoded_tokens = [
-            encoding.decode([token])
-            for token in tokens
-        ]
+            st.warning("Escribe un texto.")
 
-        data = pd.DataFrame({
-            "Posición": range(len(tokens)),
-            "Token": decoded_tokens,
-            "Token ID": tokens
-        })
+        else:
 
-        st.metric(
-            "Cantidad de tokens",
-            len(tokens)
-        )
+            try:
 
-        st.dataframe(
-            data,
-            use_container_width=True
-        )
+                tokens, token_ids = tokenize_text(token_text)
 
-    except Exception as e:
+                token_data = pd.DataFrame({
+                    "Posición": range(len(tokens)),
+                    "Token": tokens,
+                    "Token ID": token_ids
+                })
 
-        st.error(e)
+                st.metric(
+                    "Cantidad de tokens",
+                    len(tokens)
+                )
+
+                st.dataframe(
+                    token_data,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.subheader("Token IDs")
+
+                st.code(str(token_ids))
+
+            except Exception as error:
+
+                st.error(
+                    f"Error en la tokenización: {error}"
+                )
 
 
 # ============================================================
-# BAG OF WORDS
+# 3. BAG OF WORDS
 # ============================================================
 
 with tabs[2]:
 
     st.header("📚 Bag of Words")
 
-    documents = st.text_area(
-        "Escribe varios documentos, uno por línea",
-        """Python es un lenguaje de programación
-Python permite desarrollar aplicaciones
-Los modelos de lenguaje utilizan Python"""
+    st.write(
+        "Convierte los documentos en una matriz de frecuencias."
     )
 
-    docs = [
-        doc.strip()
-        for doc in documents.split("\n")
-        if doc.strip()
-    ]
+    documents_input = st.text_area(
+        "Escribe varios documentos, uno por línea",
+        value=(
+            "Python es un lenguaje de programación\n"
+            "Python permite desarrollar aplicaciones\n"
+            "Los modelos de lenguaje utilizan Python"
+        ),
+        height=150
+    )
 
-    if docs:
+    if st.button("📊 Construir Bag of Words", key="bow"):
 
-        vectorizer = CountVectorizer()
+        documents = [
+            normalize_text(doc)
+            for doc in documents_input.splitlines()
+            if normalize_text(doc)
+        ]
 
-        matrix = vectorizer.fit_transform(docs)
+        if not documents:
 
-        vocabulary = vectorizer.get_feature_names_out()
+            st.warning("Ingresa al menos un documento.")
 
-        df = pd.DataFrame(
-            matrix.toarray(),
-            columns=vocabulary
-        )
+        else:
 
-        st.subheader("Matriz Bag of Words")
+            try:
 
-        st.dataframe(
-            df,
-            use_container_width=True
-        )
+                vectorizer = CountVectorizer(
+                    lowercase=True
+                )
 
-        st.subheader("Frecuencia de palabras")
+                matrix = vectorizer.fit_transform(
+                    documents
+                )
 
-        frequencies = df.sum().sort_values(
-            ascending=False
-        )
+                vocabulary = vectorizer.get_feature_names_out()
 
-        st.bar_chart(frequencies)
+                bow_df = pd.DataFrame(
+                    matrix.toarray(),
+                    columns=vocabulary
+                )
+
+                bow_df.index = [
+                    f"Documento {i + 1}"
+                    for i in range(len(documents))
+                ]
+
+                st.subheader("Vocabulario")
+
+                st.write(list(vocabulary))
+
+                st.subheader("Matriz Bag of Words")
+
+                st.dataframe(
+                    bow_df,
+                    use_container_width=True
+                )
+
+                frequencies = bow_df.sum().sort_values(
+                    ascending=False
+                )
+
+                st.subheader("Frecuencia de palabras")
+
+                frequency_df = frequencies.reset_index()
+
+                frequency_df.columns = [
+                    "Palabra",
+                    "Frecuencia"
+                ]
+
+                fig = px.bar(
+                    frequency_df,
+                    x="Palabra",
+                    y="Frecuencia",
+                    title="Frecuencia de palabras"
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True
+                )
+
+            except Exception as error:
+
+                st.error(
+                    f"Error en Bag of Words: {error}"
+                )
 
 
 # ============================================================
-# SIMILITUD
+# 4. SIMILITUD
 # ============================================================
 
 with tabs[3]:
@@ -241,88 +455,308 @@ with tabs[3]:
 
     text1 = st.text_area(
         "Texto 1",
-        "Python es un lenguaje de programación"
+        value="Python es un lenguaje de programación",
+        height=100
     )
 
     text2 = st.text_area(
         "Texto 2",
-        "Python permite programar aplicaciones"
+        value="Python permite programar aplicaciones",
+        height=100
     )
 
-    if st.button("Calcular similitud"):
+    similarity_method = st.selectbox(
+        "Métrica",
+        [
+            "Similitud coseno (TF-IDF)",
+            "Similitud de Jaccard"
+        ]
+    )
 
-        vectorizer = TfidfVectorizer()
+    if st.button(
+        "📐 Calcular similitud",
+        key="similarity"
+    ):
 
-        vectors = vectorizer.fit_transform([
-            text1,
-            text2
-        ])
+        if not text1.strip() or not text2.strip():
 
-        similarity = cosine_similarity(
-            vectors[0:1],
-            vectors[1:2]
-        )[0][0]
+            st.warning("Ingresa ambos textos.")
 
-        st.metric(
-            "Similitud coseno",
-            f"{similarity:.4f}"
-        )
+        else:
 
-        st.progress(float(similarity))
+            try:
+
+                if similarity_method == "Similitud coseno (TF-IDF)":
+
+                    vectorizer = TfidfVectorizer()
+
+                    vectors = vectorizer.fit_transform([
+                        text1,
+                        text2
+                    ])
+
+                    score = cosine_similarity(
+                        vectors[0:1],
+                        vectors[1:2]
+                    )[0][0]
+
+                else:
+
+                    score = jaccard_similarity(
+                        text1,
+                        text2
+                    )
+
+                st.metric(
+                    "Resultado",
+                    f"{score:.4f}"
+                )
+
+                st.progress(
+                    min(max(float(score), 0.0), 1.0)
+                )
+
+                st.caption(
+                    "Un valor cercano a 1 indica mayor similitud "
+                    "según la representación utilizada."
+                )
+
+            except Exception as error:
+
+                st.error(
+                    f"Error en similitud: {error}"
+                )
 
 
 # ============================================================
-# EMBEDDINGS
+# 5. EMBEDDINGS
 # ============================================================
 
 with tabs[4]:
 
     st.header("🔢 Embeddings")
 
-    embedding_text = st.text_area(
-        "Texto para obtener embedding",
-        "Machine Learning es una rama de la inteligencia artificial."
+    st.write(
+        "Representación vectorial generada localmente "
+        "con Sentence Transformers."
     )
 
-    if st.button("Generar embedding"):
+    embedding_text = st.text_area(
+        "Texto para embedding",
+        value="Machine Learning es una rama de la inteligencia artificial.",
+        height=120
+    )
 
-        if not api_key:
+    if st.button(
+        "🧠 Generar embedding",
+        key="generate_embedding"
+    ):
 
-            st.error(
-                "Introduce tu API Key de OpenAI."
-            )
+        if not embedding_text.strip():
+
+            st.warning("Escribe un texto.")
 
         else:
 
             try:
 
-                response = client.embeddings.create(
-                    model="text-embedding-3-small",
-                    input=embedding_text
+                with st.spinner(
+                    "Cargando modelo de embeddings..."
+                ):
+
+                    embedding_model = load_embedding_model()
+
+                vector = embedding_model.encode(
+                    embedding_text,
+                    normalize_embeddings=True
                 )
 
-                vector = response.data[0].embedding
+                vector = np.asarray(vector)
 
                 st.metric(
-                    "Dimensiones",
+                    "Dimensiones del embedding",
                     len(vector)
                 )
 
-                st.write("Primeros valores del vector:")
+                st.subheader(
+                    "Primeros 20 valores del vector"
+                )
+
+                preview_size = min(20, len(vector))
+
+                embedding_df = pd.DataFrame({
+                    "Dimensión": range(preview_size),
+                    "Valor": vector[:preview_size]
+                })
 
                 st.dataframe(
-                    pd.DataFrame({
-                        "Dimensión": range(20),
-                        "Valor": vector[:20]
+                    embedding_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.subheader(
+                    "Distribución de los valores"
+                )
+
+                distribution_df = pd.DataFrame({
+                    "Dimensión": range(len(vector)),
+                    "Valor": vector
+                })
+
+                fig = px.line(
+                    distribution_df,
+                    x="Dimensión",
+                    y="Valor",
+                    title="Vector de embedding"
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True
+                )
+
+            except Exception as error:
+
+                st.error(
+                    f"Error al generar embedding: {error}"
+                )
+
+
+# ============================================================
+# 6. COMPARACIÓN DE MODELOS
+# ============================================================
+
+with tabs[5]:
+
+    st.header("⚖️ Comparación de modelos")
+
+    comparison_prompt = st.text_area(
+        "Prompt para comparar modelos",
+        value="Explica qué es inteligencia artificial en 3 frases.",
+        height=120
+    )
+
+    available_comparison_models = list(
+        MODEL_OPTIONS.items()
+    )
+
+    selected_comparison_names = st.multiselect(
+        "Selecciona los modelos",
+        options=list(MODEL_OPTIONS.keys()),
+        default=[
+            "Llama 3.1 8B Instant",
+            "Llama 3.3 70B Versatile"
+        ]
+    )
+
+    if st.button(
+        "🔄 Comparar respuestas",
+        key="compare_models"
+    ):
+
+        if not api_key:
+
+            st.error("Introduce tu API Key de Groq.")
+
+        elif not comparison_prompt.strip():
+
+            st.warning("Escribe un prompt.")
+
+        elif not selected_comparison_names:
+
+            st.warning("Selecciona al menos un modelo.")
+
+        else:
+
+            results = []
+
+            for model_name in selected_comparison_names:
+
+                model_id = MODEL_OPTIONS[model_name]
+
+                try:
+
+                    with st.spinner(
+                        f"Consultando {model_name}..."
+                    ):
+
+                        response = client.chat.completions.create(
+                            model=model_id,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": comparison_prompt
+                                }
+                            ],
+                            temperature=temperature,
+                            max_completion_tokens=int(max_tokens),
+                            top_p=top_p
+                        )
+
+                    answer = response.choices[0].message.content
+
+                    usage = response.usage
+
+                    input_tokens = (
+                        usage.prompt_tokens
+                        if usage else None
+                    )
+
+                    output_tokens = (
+                        usage.completion_tokens
+                        if usage else None
+                    )
+
+                    results.append({
+                        "Modelo": model_name,
+                        "Respuesta": answer,
+                        "Tokens de entrada": input_tokens,
+                        "Tokens de salida": output_tokens
                     })
-                )
 
-                st.write(
-                    "Los embeddings representan "
-                    "el significado del texto mediante "
-                    "un vector numérico."
-                )
+                except Exception as error:
 
-            except Exception as e:
+                    results.append({
+                        "Modelo": model_name,
+                        "Respuesta": f"Error: {error}",
+                        "Tokens de entrada": None,
+                        "Tokens de salida": None
+                    })
 
-                st.error(f"Error: {e}")
+            if results:
+
+                for result in results:
+
+                    st.subheader(
+                        result["Modelo"]
+                    )
+
+                    st.write(
+                        result["Respuesta"]
+                    )
+
+                    col1, col2 = st.columns(2)
+
+                    col1.metric(
+                        "Tokens de entrada",
+                        result["Tokens de entrada"]
+                    )
+
+                    col2.metric(
+                        "Tokens de salida",
+                        result["Tokens de salida"]
+                    )
+
+                    st.divider()
+
+
+# ============================================================
+# PIE DE PÁGINA
+# ============================================================
+
+st.sidebar.divider()
+
+st.sidebar.caption(
+    "LLM & NLP Laboratory | Python + Streamlit + Groq"
+)
