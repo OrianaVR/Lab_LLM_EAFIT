@@ -293,39 +293,144 @@ with tabs[1]:
     st.header("🔤 Tokens y Token IDs")
 
     st.info(
-        "La tokenización mostrada utiliza cl100k_base como "
-        "referencia local. No garantiza que coincida con "
-        "el tokenizador interno del modelo Groq seleccionado."
+        "Cada color representa un token diferente. "
+        "Debajo de cada token se muestra su Token ID."
     )
 
     token_text = st.text_area(
-        "Texto para tokenizar",
+        "Escribe el texto que quieres tokenizar:",
         value="Los modelos de lenguaje procesan texto mediante tokens.",
         height=120
     )
 
-    if st.button("🔍 Tokenizar texto", key="tokenize"):
+    if st.button("🔍 Tokenizar texto"):
 
         if not token_text.strip():
 
-            st.warning("Escribe un texto.")
+            st.warning("Introduce un texto.")
 
         else:
 
             try:
 
-                tokens, token_ids = tokenize_text(token_text)
+                token_data = get_token_data(token_text)
 
-                token_data = pd.DataFrame({
-                    "Posición": range(len(tokens)),
-                    "Token": tokens,
-                    "Token ID": token_ids
-                })
+                # ------------------------------------------------
+                # INFORMACIÓN GENERAL
+                # ------------------------------------------------
 
-                st.metric(
-                    "Cantidad de tokens",
-                    len(tokens)
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.metric(
+                        "🔢 Cantidad de tokens",
+                        len(token_data)
+                    )
+
+                with col2:
+                    st.metric(
+                        "📝 Caracteres",
+                        len(token_text)
+                    )
+
+                # ------------------------------------------------
+                # TOKENS EN COLORES
+                # ------------------------------------------------
+
+                st.subheader("🎨 Visualización de tokens")
+
+                colors = [
+                    "#FFB6C1",
+                    "#ADD8E6",
+                    "#98FB98",
+                    "#FFD700",
+                    "#DDA0DD",
+                    "#FFA07A",
+                    "#87CEEB",
+                    "#F0E68C",
+                    "#DA70D6",
+                    "#90EE90"
+                ]
+
+                html_tokens = ""
+
+                for i, row in token_data.iterrows():
+
+                    token = row["Token"]
+                    token_id = row["Token ID"]
+
+                    # Reemplazar espacios para visualización
+                    display_token = token.replace(
+                        " ",
+                        "␠"
+                    ).replace(
+                        "\n",
+                        "↵"
+                    )
+
+                    color = colors[
+                        i % len(colors)
+                    ]
+
+                    html_tokens += f"""
+                    <div style="
+                        display:inline-block;
+                        margin:6px;
+                        text-align:center;
+                        vertical-align:top;
+                    ">
+
+                        <div style="
+                            background-color:{color};
+                            border:2px solid #333;
+                            border-radius:10px;
+                            padding:10px 14px;
+                            min-width:50px;
+                            font-weight:bold;
+                            font-size:16px;
+                            color:#222;
+                        ">
+                            {display_token}
+                        </div>
+
+                        <div style="
+                            margin-top:4px;
+                            font-size:12px;
+                            color:#555;
+                        ">
+                            ID: {token_id}
+                        </div>
+
+                        <div style="
+                            font-size:11px;
+                            color:#888;
+                        ">
+                            #{i}
+                        </div>
+
+                    </div>
+                    """
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        padding:20px;
+                        border-radius:12px;
+                        border:1px solid #ddd;
+                        background-color:#fafafa;
+                        line-height:2.5;
+                    ">
+                        {html_tokens}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
                 )
+
+                # ------------------------------------------------
+                # TABLA
+                # ------------------------------------------------
+
+                st.subheader("📋 Información detallada")
 
                 st.dataframe(
                     token_data,
@@ -333,14 +438,22 @@ with tabs[1]:
                     hide_index=True
                 )
 
-                st.subheader("Token IDs")
+                # ------------------------------------------------
+                # GRÁFICA TOKEN ID
+                # ------------------------------------------------
 
-                st.code(str(token_ids))
+                st.subheader("📊 Token IDs")
 
-            except Exception as error:
+                st.bar_chart(
+                    token_data.set_index(
+                        "Posición"
+                    )["Token ID"]
+                )
+
+            except Exception as e:
 
                 st.error(
-                    f"Error en la tokenización: {error}"
+                    f"Error de tokenización: {e}"
                 )
 
 
