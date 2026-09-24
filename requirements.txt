@@ -1,8 +1,10 @@
-streamlit>=1.40,<2
+streamlit==1.50.0
 groq>=0.30.0
-rapidocr-onnxruntime>=1.4.4
+rapidocr==3.9.2
+onnxruntime>=1.20
+opencv-python-headless>=4.10
 Pillow>=10.0
-numpy>=1.26
+numpy>=1.26,<3
 pandas>=2.2
 scikit-learn>=1.5
 sentence-transformers>=3.0
