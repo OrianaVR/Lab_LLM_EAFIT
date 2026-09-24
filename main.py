@@ -1,6 +1,4 @@
-import io
 import re
-import math
 from collections import Counter
 
 import numpy as np
@@ -8,17 +6,12 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 from groq import Groq
-from rapidocr_onnxruntime import RapidOCR
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 import textstat
 import tiktoken
 
-
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
 
 st.set_page_config(
     page_title="LLM Lab - Groq + OCR",
@@ -37,13 +30,6 @@ st.markdown(
         font-family:monospace;
         font-size:13px;
         color:white;
-        background:#444;
-    }
-    .metric-card {
-        border:1px solid #ddd;
-        border-radius:10px;
-        padding:14px;
-        margin-bottom:8px;
     }
     </style>
     """,
@@ -51,8 +37,6 @@ st.markdown(
 )
 
 
-# Modelos de producción actuales de Groq.
-# La app también intenta consultar dinámicamente los modelos disponibles.
 DEFAULT_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -63,7 +47,16 @@ DEFAULT_MODELS = [
 
 @st.cache_resource
 def get_ocr():
-    return RapidOCR()
+    """Carga RapidOCR solo cuando el OCR es usado."""
+    try:
+        from rapidocr import RapidOCR
+        return RapidOCR()
+    except Exception as exc:
+        raise RuntimeError(
+            "No se pudo cargar RapidOCR. "
+            "Verifica que la app esté usando Python 3.12 "
+            "y las dependencias de requirements.txt."
+        ) from exc
 
 
 @st.cache_resource
@@ -72,12 +65,10 @@ def get_embedding_model():
 
 
 def get_available_models(client):
-    """Obtiene modelos disponibles desde Groq y deja los conocidos primero."""
     try:
         response = client.models.list()
         ids = [m.id for m in response.data]
 
-        # Dejamos solamente modelos que normalmente sirven para chat.
         excluded = (
             "whisper",
             "guard",
@@ -86,13 +77,15 @@ def get_available_models(client):
             "orpheus",
             "compound",
         )
+
         models = [
-            model_id for model_id in ids
+            model_id
+            for model_id in ids
             if not any(word in model_id.lower() for word in excluded)
         ]
 
         preferred = [m for m in DEFAULT_MODELS if m in models]
-        others = sorted([m for m in models if m not in preferred])
+        others = sorted(m for m in models if m not in preferred)
 
         return preferred + others
     except Exception:
@@ -100,32 +93,29 @@ def get_available_models(client):
 
 
 def extract_text_from_image(uploaded_file):
-    """OCR de una imagen usando RapidOCR."""
+    """
+    OCR con RapidOCR.
+    RapidOCR actual devuelve un objeto con:
+    result.txts y result.scores.
+    """
     image = Image.open(uploaded_file).convert("RGB")
     image_np = np.array(image)
 
     ocr = get_ocr()
-    result, _ = ocr(image_np)
+    result = ocr(image_np)
 
-    if not result:
-        return "", []
+    texts = list(getattr(result, "txts", ()) or ())
+    scores = list(getattr(result, "scores", ()) or ())
 
-    lines = []
-    details = []
+    details = [
+        {
+            "texto": text,
+            "confianza": round(float(score), 4),
+        }
+        for text, score in zip(texts, scores)
+    ]
 
-    for item in result:
-        # RapidOCR normalmente devuelve:
-        # [box, text, confidence]
-        box, text, confidence = item
-        lines.append(text)
-        details.append(
-            {
-                "texto": text,
-                "confianza": round(float(confidence), 4),
-            }
-        )
-
-    return "\n".join(lines), details
+    return "\n".join(texts), details
 
 
 def generate_text(
@@ -140,14 +130,14 @@ def generate_text(
     if style == "Formal":
         system = (
             "Eres un asistente especializado en redacción formal. "
-            "Amplía y organiza la información entregada por el usuario "
-            "con lenguaje claro, preciso y profesional."
+            "Amplía y organiza la información con lenguaje claro, "
+            "preciso y profesional."
         )
     elif style == "Técnica":
         system = (
-            "Eres un asistente técnico. Amplía la información entregada "
-            "utilizando terminología técnica cuando sea apropiado, "
-            "pero mantén la explicación comprensible."
+            "Eres un asistente técnico. Amplía la información usando "
+            "terminología técnica cuando sea apropiado, manteniendo "
+            "la explicación comprensible."
         )
     else:
         system = (
@@ -167,16 +157,13 @@ def generate_text(
     )
 
     answer = completion.choices[0].message.content or ""
-
     usage = getattr(completion, "usage", None)
 
-    usage_data = {
+    return answer, {
         "prompt_tokens": getattr(usage, "prompt_tokens", None),
         "completion_tokens": getattr(usage, "completion_tokens", None),
         "total_tokens": getattr(usage, "total_tokens", None),
     }
-
-    return answer, usage_data
 
 
 def bow_table(text):
@@ -195,7 +182,7 @@ def bow_table(text):
     )
 
 
-def tfidf_similarity(text_a, text_b):
+def cosine_text_similarity(text_a, text_b):
     if not text_a.strip() or not text_b.strip():
         return 0.0
 
@@ -210,14 +197,14 @@ def embedding_similarity(text_a, text_b):
         return 0.0
 
     model = get_embedding_model()
-    embeddings = model.encode([text_a, text_b])
+    vectors = model.encode([text_a, text_b])
 
-    similarity = cosine_similarity(
-        embeddings[0].reshape(1, -1),
-        embeddings[1].reshape(1, -1),
-    )[0][0]
-
-    return float(similarity)
+    return float(
+        cosine_similarity(
+            vectors[0].reshape(1, -1),
+            vectors[1].reshape(1, -1),
+        )[0][0]
+    )
 
 
 def text_metrics(text, reference=""):
@@ -236,12 +223,11 @@ def text_metrics(text, reference=""):
         punctuation_count / word_count if word_count else 0
     )
 
-    unique_words = len(set(w.lower() for w in words))
+    unique_words = len(set(word.lower() for word in words))
     lexical_diversity = (
         unique_words / word_count if word_count else 0
     )
 
-    # Heurísticas de calidad. Son indicadores, no un diagnóstico lingüístico.
     coherence = min(
         100,
         max(
@@ -273,8 +259,14 @@ def text_metrics(text, reference=""):
     )
 
     semantic = (
-        tfidf_similarity(text, reference) * 100
+        cosine_text_similarity(text, reference) * 100
         if reference.strip()
+        else 0
+    )
+
+    flesch = (
+        textstat.flesch_reading_ease(text)
+        if text.strip()
         else 0
     )
 
@@ -287,22 +279,23 @@ def text_metrics(text, reference=""):
         "Semántica / similitud": round(semantic, 2),
         "Sintaxis estimada": round(syntax, 2),
         "Gramática estimada": round(grammar, 2),
-        "Legibilidad Flesch": round(
-            textstat.flesch_reading_ease(text), 2
-        ) if text.strip() else 0,
+        "Legibilidad Flesch": round(flesch, 2),
     }
 
 
 def token_visualization(text):
-    """Muestra tokens y token IDs aproximados usando tiktoken."""
     try:
         encoding = tiktoken.get_encoding("cl100k_base")
         token_ids = encoding.encode(text)
-        token_texts = [encoding.decode([token_id]) for token_id in token_ids]
-    except Exception:
-        return [], []
-
-    return token_texts, token_ids
+        token_texts = [
+            encoding.decode([token_id])
+            for token_id in token_ids
+        ]
+        return token_texts, token_ids
+    except Exception as exc:
+        raise RuntimeError(
+            f"No fue posible tokenizar el texto: {exc}"
+        ) from exc
 
 
 def token_html(tokens, token_ids):
@@ -312,8 +305,8 @@ def token_html(tokens, token_ids):
     html = ""
 
     for i, (token, token_id) in enumerate(zip(tokens, token_ids)):
-        # Colores deterministas según posición.
         hue = (i * 47) % 360
+
         safe_token = (
             token.replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -323,9 +316,9 @@ def token_html(tokens, token_ids):
         )
 
         html += (
-            f'<span class="token" style="background:hsl({hue},65%,42%)">'
-            f"{safe_token} "
-            f"<small>#{token_id}</small>"
+            f'<span class="token" '
+            f'style="background:hsl({hue},65%,42%)">'
+            f"{safe_token} <small>#{token_id}</small>"
             "</span>"
         )
 
@@ -342,65 +335,51 @@ groq_key = st.sidebar.text_input(
     "API Key de Groq",
     type="password",
     placeholder="gsk_...",
-    help="La clave se utiliza únicamente durante la sesión de Streamlit.",
 )
 
 if not groq_key:
     st.title("🤖 LLM Lab — Groq + OCR")
-    st.info(
-        "Ingresa tu API Key de Groq en la barra lateral para comenzar."
-    )
-
+    st.info("Ingresa tu API Key de Groq para comenzar.")
     st.markdown(
         """
-        ### ¿Qué incluye esta plataforma?
+        ### Funcionalidades
 
-        - Selección de modelos LLM.
-        - Temperatura, Top-P y máximo de tokens.
-        - Generación y ampliación de texto.
-        - OCR para extraer texto de imágenes.
-        - Bag of Words.
-        - Tokens y Token IDs visualizados por colores.
-        - Similitud TF-IDF.
-        - Embeddings y similitud semántica.
-        - Métricas de texto.
+        Generación de texto, parámetros del LLM, OCR, tokens,
+        Token IDs, Bag of Words, similitud, embeddings y métricas.
         """
     )
-
     st.stop()
 
 client = Groq(api_key=groq_key)
-
 models = get_available_models(client)
 
 model = st.sidebar.selectbox(
     "Modelo LLM",
     models,
-    index=0,
 )
 
 temperature = st.sidebar.slider(
     "Temperatura",
-    min_value=0.0,
-    max_value=2.0,
-    value=0.7,
-    step=0.1,
+    0.0,
+    2.0,
+    0.7,
+    0.1,
 )
 
 top_p = st.sidebar.slider(
     "Top-P",
-    min_value=0.1,
-    max_value=1.0,
-    value=0.95,
-    step=0.05,
+    0.1,
+    1.0,
+    0.95,
+    0.05,
 )
 
 max_tokens = st.sidebar.slider(
     "Máximo de tokens de salida",
-    min_value=128,
-    max_value=8192,
-    value=1024,
-    step=128,
+    128,
+    8192,
+    1024,
+    128,
 )
 
 style = st.sidebar.radio(
@@ -408,18 +387,15 @@ style = st.sidebar.radio(
     ["General", "Formal", "Técnica"],
 )
 
-st.sidebar.caption(
-    "Los modelos y parámetros disponibles dependen de Groq."
-)
-
 
 # ============================================================
-# APP
+# TABS
 # ============================================================
 
 st.title("🤖 LLM Lab — Plataforma de Lenguaje + OCR")
 st.caption(
-    "Experimentación con LLM, tokens, Bag of Words, similitud, embeddings y OCR."
+    "Experimentación con LLM, tokens, Bag of Words, "
+    "similitud, embeddings y OCR."
 )
 
 tabs = st.tabs(
@@ -434,10 +410,6 @@ tabs = st.tabs(
     ]
 )
 
-
-# ============================================================
-# TAB 1 — GENERACIÓN
-# ============================================================
 
 with tabs[0]:
     st.header("Generación de texto")
@@ -467,8 +439,6 @@ with tabs[0]:
                 st.subheader("Respuesta")
                 st.write(answer)
 
-                st.subheader("Consumo de tokens")
-
                 c1, c2, c3 = st.columns(3)
 
                 c1.metric(
@@ -493,13 +463,9 @@ with tabs[0]:
                 st.session_state["generated_text"] = answer
                 st.session_state["source_text"] = prompt
 
-            except Exception as e:
-                st.error(f"Error al consultar Groq: {e}")
+            except Exception as exc:
+                st.error(f"Error al consultar Groq: {exc}")
 
-
-# ============================================================
-# TAB 2 — OCR
-# ============================================================
 
 with tabs[1]:
     st.header("🖼️ OCR + ampliación con LLM")
@@ -521,40 +487,39 @@ with tabs[1]:
         if st.button("🔎 Extraer texto con OCR"):
             try:
                 with st.spinner("Analizando imagen..."):
-                    extracted, ocr_details = extract_text_from_image(
+                    extracted, details = extract_text_from_image(
                         uploaded
                     )
 
                 st.session_state["ocr_text"] = extracted
-                st.session_state["ocr_details"] = ocr_details
+                st.session_state["ocr_details"] = details
 
-            except Exception as e:
-                st.error(f"Error en OCR: {e}")
+            except Exception as exc:
+                st.error(f"Error en OCR: {exc}")
 
     if "ocr_text" in st.session_state:
         extracted = st.session_state["ocr_text"]
 
         st.subheader("Texto extraído")
-        st.text_area(
+
+        editable_text = st.text_area(
             "Puedes editar el texto antes de enviarlo al LLM.",
-            extracted,
+            value=extracted,
             height=220,
             key="ocr_editable",
         )
 
         if st.button("✨ Ampliar texto con LLM", type="primary"):
-            final_text = st.session_state["ocr_editable"]
-
             instruction = f"""
-            A partir del siguiente texto extraído de una imagen:
+A partir del siguiente texto extraído de una imagen:
 
-            --- TEXTO ---
-            {final_text}
-            --- FIN DEL TEXTO ---
+--- TEXTO ---
+{editable_text}
+--- FIN DEL TEXTO ---
 
-            Amplía, organiza y explica la información.
-            Mantén las ideas principales y agrega contexto útil.
-            """
+Amplía, organiza y explica la información.
+Mantén las ideas principales y agrega contexto útil.
+"""
 
             try:
                 with st.spinner("Generando ampliación..."):
@@ -572,27 +537,25 @@ with tabs[1]:
                 st.write(answer)
 
                 st.session_state["generated_text"] = answer
-                st.session_state["source_text"] = final_text
+                st.session_state["source_text"] = editable_text
 
-                st.caption(
-                    f"Tokens utilizados: {usage['total_tokens']}"
-                    if usage["total_tokens"] is not None
-                    else "Tokens: N/D"
+                if usage["total_tokens"] is not None:
+                    st.caption(
+                        f"Tokens utilizados: {usage['total_tokens']}"
+                    )
+
+            except Exception as exc:
+                st.error(
+                    f"Error al generar la ampliación: {exc}"
                 )
-
-            except Exception as e:
-                st.error(f"Error al generar la ampliación: {e}")
 
         if st.session_state.get("ocr_details"):
             st.subheader("Confianza del OCR")
+            st.dataframe(
+                pd.DataFrame(st.session_state["ocr_details"]),
+                use_container_width=True,
+            )
 
-            ocr_df = pd.DataFrame(st.session_state["ocr_details"])
-            st.dataframe(ocr_df, use_container_width=True)
-
-
-# ============================================================
-# TAB 3 — TOKENS
-# ============================================================
 
 with tabs[2]:
     st.header("🔤 Tokens y Token IDs")
@@ -607,35 +570,36 @@ with tabs[2]:
     )
 
     if st.button("Tokenizar"):
-        tokens, token_ids = token_visualization(text_for_tokens)
+        try:
+            tokens, token_ids = token_visualization(
+                text_for_tokens
+            )
 
-        st.write(f"Cantidad de tokens: **{len(tokens)}**")
+            st.write(f"Cantidad de tokens: **{len(tokens)}**")
+            st.markdown(
+                token_html(tokens, token_ids),
+                unsafe_allow_html=True,
+            )
 
-        st.markdown(
-            token_html(tokens, token_ids),
-            unsafe_allow_html=True,
-        )
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "posición": range(len(tokens)),
+                        "token": tokens,
+                        "token_id": token_ids,
+                    }
+                ),
+                use_container_width=True,
+            )
 
-        token_df = pd.DataFrame(
-            {
-                "posición": range(len(tokens)),
-                "token": tokens,
-                "token_id": token_ids,
-            }
-        )
+            st.info(
+                "Se usa cl100k_base como referencia didáctica; "
+                "el tokenizer exacto puede variar según el modelo."
+            )
 
-        st.dataframe(token_df, use_container_width=True)
+        except Exception as exc:
+            st.error(str(exc))
 
-        st.info(
-            "La visualización utiliza el tokenizer cl100k_base como "
-            "referencia didáctica. Los tokenizadores internos pueden "
-            "variar según el modelo utilizado por Groq."
-        )
-
-
-# ============================================================
-# TAB 4 — BOW
-# ============================================================
 
 with tabs[3]:
     st.header("📚 Bag of Words")
@@ -652,7 +616,6 @@ with tabs[3]:
     if bow_text.strip():
         bow = bow_table(bow_text)
 
-        st.subheader("Frecuencia de palabras")
         st.dataframe(bow, use_container_width=True)
 
         if not bow.empty:
@@ -660,10 +623,6 @@ with tabs[3]:
                 bow.set_index("palabra")["frecuencia"].head(15)
             )
 
-
-# ============================================================
-# TAB 5 — SIMILITUD
-# ============================================================
 
 with tabs[4]:
     st.header("📐 Métricas de similitud")
@@ -682,23 +641,21 @@ with tabs[4]:
 
     if st.button("Calcular similitud"):
         if source.strip() and generated.strip():
-            tfidf = tfidf_similarity(source, generated)
+            similarity = cosine_text_similarity(
+                source,
+                generated,
+            )
 
             st.metric(
                 "Similitud TF-IDF / coseno",
-                f"{tfidf * 100:.2f}%",
+                f"{similarity * 100:.2f}%",
             )
-
-            st.progress(min(1.0, tfidf))
+            st.progress(min(1.0, similarity))
         else:
             st.warning(
                 "Necesitas un texto original y uno generado."
             )
 
-
-# ============================================================
-# TAB 6 — EMBEDDINGS
-# ============================================================
 
 with tabs[5]:
     st.header("🧠 Embeddings")
@@ -717,46 +674,40 @@ with tabs[5]:
 
     if st.button("Calcular embeddings"):
         if embedding_a.strip() and embedding_b.strip():
-            with st.spinner("Calculando embeddings..."):
-                similarity = embedding_similarity(
-                    embedding_a,
-                    embedding_b,
+            try:
+                with st.spinner("Calculando embeddings..."):
+                    similarity = embedding_similarity(
+                        embedding_a,
+                        embedding_b,
+                    )
+
+                    vectors = get_embedding_model().encode(
+                        [embedding_a, embedding_b]
+                    )
+
+                st.metric(
+                    "Similitud semántica",
+                    f"{similarity * 100:.2f}%",
                 )
 
-            model_embedding = get_embedding_model()
-            vectors = model_embedding.encode(
-                [embedding_a, embedding_b]
-            )
+                st.write(
+                    f"Dimensión del embedding: "
+                    f"**{vectors.shape[1]}**"
+                )
 
-            st.metric(
-                "Similitud semántica",
-                f"{similarity * 100:.2f}%",
-            )
+                st.dataframe(
+                    pd.DataFrame(
+                        vectors,
+                        index=["Texto A", "Texto B"],
+                    ).iloc[:, :20],
+                    use_container_width=True,
+                )
 
-            st.write(
-                f"Dimensión del embedding: "
-                f"**{vectors.shape[1]}**"
-            )
+            except Exception as exc:
+                st.error(f"Error calculando embeddings: {exc}")
+        else:
+            st.warning("Ingresa ambos textos.")
 
-            embedding_df = pd.DataFrame(
-                vectors,
-                index=["Texto A", "Texto B"],
-            )
-
-            st.dataframe(
-                embedding_df.iloc[:, :20],
-                use_container_width=True,
-            )
-
-            st.caption(
-                "Se muestran las primeras 20 dimensiones como "
-                "vista parcial del vector."
-            )
-
-
-# ============================================================
-# TAB 7 — MÉTRICAS
-# ============================================================
 
 with tabs[6]:
     st.header("📊 Métricas del texto generado")
@@ -768,7 +719,7 @@ with tabs[6]:
     )
 
     reference = st.text_area(
-        "Texto de referencia para medir similitud semántica",
+        "Texto de referencia",
         value=st.session_state.get("source_text", ""),
         height=150,
     )
@@ -777,18 +728,15 @@ with tabs[6]:
         if not metric_text.strip():
             st.warning("Escribe o genera un texto primero.")
         else:
-            metrics = text_metrics(metric_text, reference)
+            metrics = text_metrics(
+                metric_text,
+                reference,
+            )
 
             cols = st.columns(4)
 
-            cols[0].metric(
-                "Palabras",
-                metrics["Palabras"],
-            )
-            cols[1].metric(
-                "Oraciones",
-                metrics["Oraciones"],
-            )
+            cols[0].metric("Palabras", metrics["Palabras"])
+            cols[1].metric("Oraciones", metrics["Oraciones"])
             cols[2].metric(
                 "Coherencia estimada",
                 f'{metrics["Coherencia estimada"]:.1f}/100',
@@ -798,28 +746,26 @@ with tabs[6]:
                 f'{metrics["Gramática estimada"]:.1f}/100',
             )
 
-            metrics_df = pd.DataFrame(
-                {
-                    "Métrica": list(metrics.keys()),
-                    "Valor": list(metrics.values()),
-                }
-            )
-
             st.dataframe(
-                metrics_df,
+                pd.DataFrame(
+                    {
+                        "Métrica": list(metrics.keys()),
+                        "Valor": list(metrics.values()),
+                    }
+                ),
                 use_container_width=True,
             )
 
             st.info(
-                "Las métricas de coherencia, sintaxis y gramática "
-                "son indicadores heurísticos. No sustituyen una "
-                "evaluación lingüística profesional."
+                "Coherencia, sintaxis y gramática son indicadores "
+                "heurísticos y no sustituyen una evaluación "
+                "lingüística profesional."
             )
 
 
 st.divider()
 
 st.caption(
-    "LLM Lab — Plataforma educativa de experimentación con "
-    "modelos de lenguaje, OCR, tokens, similitud y embeddings."
+    "LLM Lab — Plataforma educativa de experimentación "
+    "con LLM, OCR, tokens, similitud y embeddings."
 )
