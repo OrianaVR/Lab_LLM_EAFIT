@@ -1,1 +1,7 @@
-
+streamlit
+openai
+tiktoken
+scikit-learn
+numpy
+pandas
+plotly
